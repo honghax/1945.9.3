@@ -28,7 +28,6 @@ add_executable(war3d
     src/text_atlas.cpp
     src/routes.cpp
     src/water.cpp
-    src/river_water.cpp
     src/map_symbols.cpp
     src/narration.cpp
     ${IMGUI}/imgui.cpp

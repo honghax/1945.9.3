@@ -63,6 +63,13 @@ Vec3 SideColor(const std::string& side)
     return Vec3(0.17f, 0.38f, 0.70f);
 }
 
+Vec3 EventColor(const std::string& side)
+{
+    if (side == "日") return Vec3(0.74f, 0.20f, 0.15f);
+    if (side == "中") return Vec3(0.24f, 0.48f, 0.80f);
+    return Vec3(0.94f, 0.64f, 0.24f);
+}
+
 void PushTri(std::vector<float>& out, const Vec3& a, const Vec3& b, const Vec3& c,
              const Vec3& col, float alpha)
 {
@@ -78,16 +85,67 @@ void PushTri(std::vector<float>& out, const Vec3& a, const Vec3& b, const Vec3& 
     }
 }
 
-void PushBandQuad(std::vector<float>& out, const Vec3& a0, const Vec3& a1, const Vec3& b0,
-                  const Vec3& b1, const Vec3& col, float alpha, bool dashed, float dist0)
+void PushQuad(std::vector<float>& out, const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d,
+              const Vec3& col, float alpha)
 {
-    // dashed 时按 2km 周期断开
-    if (dashed) {
-        const float period = 2.0f;
-        if (std::fmod(dist0, period) > period * 0.55f) return;
+    PushTri(out, a, b, c, col, alpha);
+    PushTri(out, a, c, d, col, alpha);
+}
+
+// 水平细带：a→b，半宽 half（世界单位 km），两端点共用 a.y 高度
+void PushSegment(std::vector<float>& out, const Vec3& a, const Vec3& b, float half,
+                 const Vec3& col, float alpha)
+{
+    Vec3 d(b.x - a.x, 0.f, b.z - a.z);
+    if (Length(d) < 1e-5f) return;
+    d = Normalize(d);
+    const Vec3 n(-d.z, 0.f, d.x);
+    PushQuad(out, a + n * half, b + n * half, b - n * half, a - n * half, col, alpha);
+}
+
+// 缓冲 a0/a1（起点两侧）→ b0/b1（终点两侧）。dashed 时按 2km 周期断开，
+// 子段长 0.25km，flow 使虚线沿行军方向连续滑动，长空档期也能看出推进方向
+void PushBandQuad(std::vector<float>& out, const Vec3& a0, const Vec3& a1, const Vec3& b0,
+                  const Vec3& b1, const Vec3& col, float alpha, bool dashed, float dist0,
+                  float segLen, float flow)
+{
+    if (!dashed) {
+        PushQuad(out, a0, b0, b1, a1, col, alpha);
+        return;
     }
-    PushTri(out, a0, b0, b1, col, alpha);
-    PushTri(out, a0, b1, a1, col, alpha);
+    constexpr float period = 2.0f;
+    constexpr float dashLen = 1.1f;
+    const int n = std::max(1, static_cast<int>(std::ceil(segLen / 0.25f)));
+    for (int k = 0; k < n; ++k) {
+        const float t0 = static_cast<float>(k) / static_cast<float>(n);
+        const float t1 = static_cast<float>(k + 1) / static_cast<float>(n);
+        float phase = std::fmod(dist0 + segLen * t0 - flow, period);
+        if (phase < 0.f) phase += period;
+        if (phase > dashLen) continue;
+        const Vec3 s0 = a0 + (b0 - a0) * t0;
+        const Vec3 s1 = a1 + (b1 - a1) * t0;
+        const Vec3 e0 = a0 + (b0 - a0) * t1;
+        const Vec3 e1 = a1 + (b1 - a1) * t1;
+        PushQuad(out, s0, e0, e1, s1, col, alpha);
+    }
+}
+
+// 单位框：矩形外框 + 内部叉号（标准步兵符号），中心 c，长轴沿 dir
+void PushUnitBox(std::vector<float>& out, const Vec3& c, const Vec3& dir, float halfLen,
+                 float halfWid, float thick, const Vec3& col, float alpha)
+{
+    const Vec3 u = Normalize(Vec3(dir.x, 0.f, dir.z));
+    const Vec3 v(-u.z, 0.f, u.x);
+    const Vec3 p00 = c - u * halfLen - v * halfWid;
+    const Vec3 p10 = c + u * halfLen - v * halfWid;
+    const Vec3 p11 = c + u * halfLen + v * halfWid;
+    const Vec3 p01 = c - u * halfLen + v * halfWid;
+    PushSegment(out, p00, p10, thick, col, alpha);
+    PushSegment(out, p10, p11, thick, col, alpha);
+    PushSegment(out, p11, p01, thick, col, alpha);
+    PushSegment(out, p01, p00, thick, col, alpha);
+    PushSegment(out, p00, p11, thick * 0.8f, col, alpha * 0.85f);
+    PushSegment(out, p01, p10, thick * 0.8f, col, alpha * 0.85f);
 }
 
 }  // namespace
@@ -199,6 +257,34 @@ bool MapSymbols::Load(const std::string& dataDir)
     loadPolygons(dataDir + "/territory.csv", areas_);
     loadPolygons(dataDir + "/positions.csv", positions_);
 
+    // 把控制点按弧长加密：原来两点之间是直线，几十公里跨度会直接穿过山体。
+    // 加密后每段只有 1.5~3km，逐点采样地形就能贴着地表走
+    auto densify = [](SymbolSet& s, float stepKm) {
+        if (s.lon.size() < 2) return;
+        constexpr float kLonKm = 95.f;   // 区域中纬度上的每度经线长度（约）
+        constexpr float kLatKm = 111.f;
+        std::vector<float> lon;
+        std::vector<float> lat;
+        for (size_t i = 0; i + 1 < s.lon.size(); ++i) {
+            const float dLon = s.lon[i + 1] - s.lon[i];
+            const float dLat = s.lat[i + 1] - s.lat[i];
+            const float km = std::sqrt((dLon * kLonKm) * (dLon * kLonKm)
+                                       + (dLat * kLatKm) * (dLat * kLatKm));
+            const int n = std::max(1, static_cast<int>(std::ceil(km / stepKm)));
+            for (int k = 0; k < n; ++k) {
+                const float t = static_cast<float>(k) / static_cast<float>(n);
+                lon.push_back(s.lon[i] + dLon * t);
+                lat.push_back(s.lat[i] + dLat * t);
+            }
+        }
+        lon.push_back(s.lon.back());
+        lat.push_back(s.lat.back());
+        s.lon.swap(lon);
+        s.lat.swap(lat);
+    };
+    for (SymbolSet& s : movements_) densify(s, 1.5f);
+    for (SymbolSet& s : positions_) densify(s, 3.0f);
+
     std::printf("[symbols] 箭头 %zu 条，占领区 %zu 个，阵地 %zu 条\n", movements_.size(),
                 areas_.size(), positions_.size());
     return !movements_.empty();
@@ -213,7 +299,7 @@ void MapSymbols::Destroy()
 
 void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExact,
                       const HeightField& hf, const GeoBounds& bounds, float heightExaggeration,
-                      const TerrainMesh& terrain)
+                      const TerrainMesh& terrain, const EventTable& events)
 {
     (void)program;
     const int currentDay = static_cast<int>(std::floor(currentDayExact));
@@ -229,6 +315,10 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
         const float y = hf.Sample(u, v) * 0.001f * heightExaggeration + lift;
         return Vec3(x, y, z);
     };
+
+    // 虚线流动相位与阵地脉动：时间轴停在长空档时画面仍有推进感
+    const float flow = currentDayExact * 1.15f;
+    const float pulse = 0.5f + 0.5f * std::sin(currentDayExact * 2.2f);
 
     // ---- 占领区：多边形扇形填充 ----
     for (const SymbolSet& a : areas_) {
@@ -254,7 +344,6 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
     // ---- 箭头 ----
     for (const SymbolSet& m : movements_) {
         if (currentDay < m.startDay) continue;
-        if (currentDay > m.endDay + 30) continue;
 
         float progress = 1.f;
         if (m.endDay > m.startDay) {
@@ -264,12 +353,19 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
         }
         if (progress <= 0.001f) continue;
 
+        // 到位后 6 天内渐隐到 0.46，作为战役经过保留，不会在某一帧突然消失
+        float persist = 1.f;
+        if (currentDayExact > static_cast<float>(m.endDay)) {
+            const float late = (currentDayExact - static_cast<float>(m.endDay)) / 6.f;
+            persist = 0.46f + 0.44f * std::max(0.f, 1.f - late);
+        }
+
         const bool dashed = (m.style == "retreat");
         const Vec3 col = SideColor(m.side);
 
         std::vector<Vec3> pts;
         pts.reserve(m.lon.size());
-        for (size_t i = 0; i < m.lon.size(); ++i) pts.push_back(worldAt(m.lon[i], m.lat[i], 2.6f));
+        for (size_t i = 0; i < m.lon.size(); ++i) pts.push_back(worldAt(m.lon[i], m.lat[i], 1.4f));
 
         // 总长
         std::vector<float> segLen(pts.size(), 0.f);
@@ -299,26 +395,37 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
             const Vec3 a1 = a - n * half;
             const Vec3 b0 = b + n * half;
             const Vec3 b1 = b - n * half;
-            PushBandQuad(verts, a0, a1, b0, b1, col, 0.90f, dashed, lastDist);
+            // 仍在推进的实线箭头：一道缓行的明度波，跨度长时也能看出方向
+            const float glint = (!dashed && progress < 0.999f)
+                                    ? 1.f + 0.16f * std::sin(lastDist * 1.15f - currentDayExact * 2.4f)
+                                    : 1.f;
+            PushBandQuad(verts, a0, a1, b0, b1, col * glint, 0.90f * persist, dashed, lastDist,
+                         segLen[i] * segT, flow);
 
             lastDist += segLen[i];
             acc += segLen[i];
         }
 
-        // 箭头头部（在进度末端）
+        // 箭头头部（在进度末端）：高度取末端的实际地面，三个顶点共用，避免扎进山脊
         {
             float cum = 0.f;
             Vec3 tip = pts.back();
             Vec3 dir(0.f, 0.f, 1.f);
+            float tipLon = m.lon.back();
+            float tipLat = m.lat.back();
             for (size_t i = 0; i + 1 < pts.size(); ++i) {
                 if (cum + segLen[i] >= target) {
                     const float t = (target - cum) / std::max(segLen[i], 1e-4f);
                     tip = pts[i] + (pts[i + 1] - pts[i]) * t;
+                    tipLon = m.lon[i] + (m.lon[i + 1] - m.lon[i]) * t;
+                    tipLat = m.lat[i] + (m.lat[i + 1] - m.lat[i]) * t;
                     dir = Normalize(Vec3(pts[i + 1].x - pts[i].x, 0.f, pts[i + 1].z - pts[i].z));
                     break;
                 }
                 cum += segLen[i];
                 tip = pts[i + 1];
+                tipLon = m.lon[i + 1];
+                tipLat = m.lat[i + 1];
                 if (i + 2 < pts.size()) {
                     dir = Normalize(Vec3(pts[i + 1].x - pts[i].x, 0.f, pts[i + 1].z - pts[i].z));
                 }
@@ -326,8 +433,47 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
             const Vec3 n(-dir.z, 0.f, dir.x);
             const float headLen = m.widthKm * 2.7f;
             const float headHalf = m.widthKm * 1.25f;
-            const Vec3 headTip = tip + dir * headLen;
-            PushTri(verts, headTip, tip + n * headHalf, tip - n * headHalf, col, 0.90f);
+            const float y = worldAt(tipLon, tipLat, 1.4f).y;
+            const Vec3 headTip(tip.x + dir.x * headLen, y, tip.z + dir.z * headLen);
+            const Vec3 headL(tip.x + n.x * headHalf, y, tip.z + n.z * headHalf);
+            const Vec3 headR(tip.x - n.x * headHalf, y, tip.z - n.z * headHalf);
+            // 生长中的箭头头部轻微脉动，提示该轴线仍在推进
+            const float headAlpha = (progress < 0.999f ? 0.84f + 0.16f * pulse : 0.90f) * persist;
+            PushTri(verts, headTip, headL, headR, col, headAlpha);
+        }
+    }
+
+    // ---- 单位框：进攻 / 追击轴线的出发位置，矩形框 + 叉号（标准步兵符号）----
+    {
+        std::vector<Vec3> placed;
+        for (const SymbolSet& m : movements_) {
+            if (m.style != "attack" && m.style != "pursuit") continue;
+            if (currentDay < m.startDay || currentDay > m.endDay + 4) continue;
+            if (m.lon.size() < 2) continue;
+
+            const Vec3 p0 = worldAt(m.lon[0], m.lat[0], 1.5f);
+            bool tooClose = false;
+            for (const Vec3& q : placed) {
+                if (Length(q - p0) < 7.f) { tooClose = true; break; }
+            }
+            if (tooClose) continue;
+
+            // 方向必须在世界坐标里算：经度与纬度方向的公里尺度不同
+            const Vec3 p1 = worldAt(m.lon[1], m.lat[1], 1.5f);
+            const Vec3 dir(p1.x - p0.x, 0.f, p1.z - p0.z);
+            if (Length(dir) < 1e-4f) continue;
+            placed.push_back(p0);
+
+            const float fadeIn = std::max(0.f, std::min(1.f, (currentDayExact - m.startDay + 0.5f)));
+            const float stay = currentDay > m.endDay ? 0.40f : 0.86f;
+            const float alpha = stay * fadeIn;
+            if (alpha < 0.03f) continue;
+
+            const float hu = m.widthKm * 1.10f + 1.2f;
+            const float hv = m.widthKm * 0.58f + 0.6f;
+            const Vec3 u = Normalize(dir);
+            const Vec3 center = p0 - u * (hu * 0.72f);
+            PushUnitBox(verts, center, dir, hu, hv, 0.26f, SideColor(m.side), alpha);
         }
     }
 
@@ -335,11 +481,13 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
     for (const SymbolSet& p : positions_) {
         if (currentDay < p.startDay || currentDay > p.endDay) continue;
         const Vec3 col = SideColor(p.side);
-        const float alpha = 0.75f;
+        // 阵地线随时间呼吸，梳齿长度同步起伏
+        const float alpha = 0.62f + 0.20f * pulse;
+        const float toothLen = 1.05f + 0.32f * pulse;
 
         std::vector<Vec3> pts;
         pts.reserve(p.lon.size());
-        for (size_t i = 0; i < p.lon.size(); ++i) pts.push_back(worldAt(p.lon[i], p.lat[i], 2.2f));
+        for (size_t i = 0; i < p.lon.size(); ++i) pts.push_back(worldAt(p.lon[i], p.lat[i], 1.2f));
 
         float travelled = 0.f;
         for (size_t i = 0; i + 1 < pts.size(); ++i) {
@@ -360,7 +508,7 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
             while (s < segLen) {
                 const float t = s / segLen;
                 const Vec3 base = a + (b - a) * t;
-                const Vec3 tooth = base + n * 1.2f;
+                const Vec3 tooth = base + n * toothLen;
                 const float tw = 0.35f;
                 PushTri(verts, base + dir * tw, tooth + dir * tw, tooth - dir * tw, col, alpha);
                 PushTri(verts, base + dir * tw, tooth - dir * tw, base - dir * tw, col, alpha);
@@ -369,6 +517,27 @@ void MapSymbols::Draw(GLuint program, const Mat4& viewProj, float currentDayExac
             travelled += segLen;
         }
         (void)travelled;
+    }
+
+    // ---- 交战点：交叉叉号（标准战场标注），按下当月序脉动 ----
+    for (const WarEvent& ev : events.All()) {
+        if (!ev.hasCoord) continue;
+        if (ev.category != "战斗" && ev.category != "失守" && ev.category != "登陆") continue;
+        if (currentDayExact < static_cast<float>(ev.startDay)
+            || currentDayExact > static_cast<float>(ev.endDay) + 1.f) continue;
+
+        const float fade = std::min(1.f, (currentDayExact - static_cast<float>(ev.startDay)) / 0.7f);
+        if (fade <= 0.f) continue;
+        const float beat = 0.5f + 0.5f * std::sin(currentDayExact * 3.4f + ev.lon * 7.f);
+        const float s = 2.3f * (0.90f + 0.10f * beat);
+        const Vec3 c = worldAt(ev.lon, ev.lat, 2.2f);
+        const Vec3 u(0.79f * s, 0.f, 0.61f * s);
+        const Vec3 v(-0.61f * s, 0.f, 0.79f * s);
+        const Vec3 col = EventColor(ev.side);
+        const float tail = currentDay > ev.endDay ? 0.45f : 1.f;
+        const float alpha = (0.40f + 0.26f * beat) * fade * tail;
+        PushSegment(verts, c - u, c + u, 0.32f, col, alpha);
+        PushSegment(verts, c - v, c + v, 0.32f, col, alpha);
     }
 
     if (verts.empty()) return;

@@ -30,7 +30,6 @@
 #include "map_symbols.h"
 #include "math3d.h"
 #include "narration.h"
-#include "river_water.h"
 #include "routes.h"
 #include "terrain.h"
 #include "text_atlas.h"
@@ -71,7 +70,7 @@ struct AppState {
     EventTable events;
     RouteMesh routes;
     WaterSurface water;
-    RiverSurface riverWater;
+
     MapSymbols symbols;
     Narration narration;
     // 真实 DEM 下 8 倍夸张（487km 跨度上，1500m 山地抬到 12km，接近微缩沙盘手感）
@@ -85,9 +84,6 @@ struct AppState {
     bool playing = false;
     float uiSpeed = 1.0f;          // 演示倍速（UI 滑杆），实际天/秒 = 1.0 * uiSpeed
     int selectedEvent = -1;        // UI 中选中的事件下标
-    float waterLevelMeters = 31.f;
-    bool waterDirty = false;
-
     // 相机平滑与点击拾取
     Vec3 camGoal;
     bool camAnimating = false;
@@ -548,83 +544,100 @@ void main()
 
 const char* kWaterVS = R"(#version 430 core
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in float aDepthM;
+layout(location = 1) in float aDepth;
 layout(location = 2) in float aMask;
 layout(location = 3) in float aRiverMix;
 uniform mat4 uViewProj;
+uniform vec2 uWorldSize;
 out vec3 vWorld;
-out float vDepthM;
+out float vDepth;
 out float vMask;
 out float vRiverMix;
+out vec2 vUV;
 void main()
 {
     vWorld = aPos;
-    vDepthM = aDepthM;
+    vDepth = aDepth;
     vMask = aMask;
     vRiverMix = aRiverMix;
+    vUV = vec2(aPos.x / uWorldSize.x + 0.5, aPos.z / uWorldSize.y + 0.5);
     gl_Position = uViewProj * vec4(aPos, 1.0);
 }
 )";
 
 const char* kWaterFS = R"(#version 430 core
 in vec3 vWorld;
-in float vDepthM;
+in float vDepth;
 in float vMask;
 in float vRiverMix;
+in vec2 vUV;
 uniform vec3 uEye;
 uniform vec3 uSunDir;
 uniform float uTime;
+uniform sampler2D uWaterMask;
+uniform sampler2D uAlbedo;
+uniform float uHasAlbedo;
 out vec4 fragColor;
 
 void main()
 {
-    // 地形高于水位的地方不出水；太浅则露出洲滩
-    if (vDepthM <= 0.2 || vMask <= 0.02) discard;
-    float shore = smoothstep(0.15, 1.4, vDepthM);
-    if (shore <= 0.02) discard;
+    // 岸线直接来自 World_Topo_Map 提取的水系掩码，双线性插值给出自然弯曲的岸
+    float wet = texture(uWaterMask, vUV).r;
+    if (wet < 0.34) discard;
 
-    vec3 V = normalize(uEye - vWorld);
+    float shore = smoothstep(0.30, 0.72, wet);
+    vec3 eye = uEye - vWorld;
+    float dist = length(eye);
+    vec3 V = normalize(eye);
 
-    // 程序化波纹：交叉正弦 + 相位扰动，避免规则条纹
-    float dist = length(uEye - vWorld);
-    float rippleFade = 1.0 - smoothstep(250.0, 500.0, dist);
-    vec2 p = vWorld.xz * 2.2;
+    // 三组不同方向与频率的正弦叠加，取梯度作为扰动法线；
+    // 远处淡出，避免高频波纹在长距离下走样成摩尔纹
     float t = uTime;
-    float phase = sin(p.x * 0.63 + p.y * 0.41) * 2.6;
-    p += vec2(phase, phase * 0.73);
-    vec3 n = normalize(vec3(
-        (sin(p.x * 2.0 + t * 1.1) * 0.10 + sin(p.y * 3.3 - t * 0.75) * 0.06) * rippleFade,
-        1.0,
-        (cos(p.y * 2.4 + t * 0.9) * 0.10 + cos(p.x * 3.1 + t * 1.25) * 0.06) * rippleFade));
+    vec2 p = vWorld.xz;
+    float fade = 1.0 - smoothstep(70.0, 260.0, dist);
+
+    float c1 = cos(p.x * 0.90 + p.y * 0.42 + t * 0.90);
+    float c2 = cos(p.x * 2.30 - p.y * 0.61 + t * 1.40);
+    float c3 = cos((p.x + p.y) * 5.10 - t * 2.20);
+
+    float gx = c1 * 0.90 * 0.55 + c2 * 2.30 * 0.30 + c3 * 5.10 * 0.14;
+    float gz = c1 * 0.42 * 0.55 - c2 * 0.61 * 0.30 + c3 * 5.10 * 0.14;
+
+    vec3 n = normalize(vec3(-gx * 0.09 * fade, 1.0, -gz * 0.09 * fade));
 
     float ndv = max(dot(n, V), 0.0);
-    // 给一个反射下限，俯视时水面也有天色反光，不至于像一块塑料
-    float fres = 0.14 + 0.86 * pow(1.0 - ndv, 5.0);
+    float fres = 0.10 + 0.90 * pow(1.0 - ndv, 5.0);
 
-    // 洞庭湖含沙量高，水色偏黄绿；河道取偏青蓝，便于在地形上辨认
-    float depthScale = mix(8.0, 3.0, vRiverMix);
-    float d = clamp(vDepthM / depthScale, 0.0, 1.0);
-    vec3 shallow = mix(vec3(0.30, 0.34, 0.27), vec3(0.22, 0.36, 0.42), vRiverMix);
-    vec3 deep = mix(vec3(0.07, 0.15, 0.18), vec3(0.08, 0.21, 0.28), vRiverMix);
+    // 反射方向的仰角决定反射到天空的哪一部分：越低越接近地平线的灰白
+    vec3 R = reflect(-V, n);
+    float up = clamp(R.y, 0.0, 1.0);
+    vec3 skyRefl = mix(vec3(0.70, 0.76, 0.80), vec3(0.32, 0.48, 0.68), up);
+
+    float d = clamp(vDepth, 0.0, 1.0);
+    vec3 shallow = vec3(0.32, 0.44, 0.45);
+    vec3 deep = vec3(0.06, 0.17, 0.24);
     vec3 body = mix(shallow, deep, pow(d, 0.55));
 
-    vec3 skyCol = mix(vec3(0.46, 0.55, 0.63), vec3(0.66, 0.74, 0.80), fres);
-    vec3 color = mix(body, skyCol, fres * 0.62);
+    // 俯视时 Fresnel 很小，但水面仍会反射一部分天空；缺了这一项水面就发黑。
+    // 叠一层缓慢移动的风场，让大片水面有明暗流动而不是一块纯色
+    float gust = sin(p.x * 0.11 + t * 0.28) * sin(p.y * 0.14 - t * 0.21);
+    float skyMix = 0.32 + 0.50 * fres + gust * 0.07;
+    vec3 color = mix(body, skyRefl, clamp(skyMix, 0.0, 1.0));
 
+    // 太阳碎光：法线扰动把高光打散成闪烁亮点，这是水最关键的特征
     vec3 H = normalize(V + normalize(uSunDir));
-    float spec = pow(max(dot(n, H), 0.0), 130.0) * 0.75;
-    color += vec3(1.0, 0.94, 0.82) * spec;
+    float spec = pow(max(dot(n, H), 0.0), 90.0);
+    color += vec3(1.0, 0.96, 0.88) * spec * 2.2;
 
-    // 岸边浪花：极浅的一圈泛白，帮助读出岸线
-    float foam = smoothstep(1.1, 0.25, vDepthM) * 0.32;
-    color = mix(color, vec3(0.76, 0.79, 0.77), foam);
+    // 极近岸的一圈泡沫，用噪声打散，避免出现均匀的描边
+    float foamBand = smoothstep(0.52, 0.36, wet);
+    float foamNoise = 0.5 + 0.5 * sin(wet * 90.0 + t * 1.8 + p.x * 0.9 + p.y * 0.7);
+    color = mix(color, vec3(0.80, 0.83, 0.81), foamBand * foamNoise * 0.26);
 
     float fog = clamp((dist - 380.0) / 560.0, 0.0, 1.0);
     color = mix(color, vec3(0.60, 0.66, 0.70), fog * 0.72);
 
-    // 浅水略透，深水近实；河道更实以保持可读性
-    float baseAlpha = mix(0.82, 0.98, d);
-    float alpha = vMask * shore * mix(baseAlpha, 0.96, vRiverMix);
+    float alpha = shore * mix(0.78, 0.96, d);
     fragColor = vec4(color, alpha);
 }
 )";
@@ -898,11 +911,9 @@ void DrawUI()
         }
 
         ImGui::Separator();
-        ImGui::TextDisabled("环境");
-        ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::SliderFloat("##waterlevel", &g_app.waterLevelMeters, 20.f, 42.f, "水位 %.0f m")) {
-            g_app.waterDirty = true;
-        }
+        ImGui::TextDisabled("水系");
+        ImGui::Text("水位 %.1f m", g_app.water.WaterLevelMeters());
+        ImGui::TextDisabled("轮廓取自制图底图");
     }
     ImGui::End();
 
@@ -1004,6 +1015,7 @@ void DrawLabels(const Mat4& viewProj)
     const float scale = 0.95f;
     std::vector<float> verts;
     verts.reserve(512 * 8);
+    std::vector<float> placed;   // 已放置标签的屏幕矩形 x,y,w,h，用于避让
 
     auto emit = [&](float lon, float lat, int labelIndex, const Vec3& color, float alpha,
                     float lift) {
@@ -1024,8 +1036,28 @@ void DrawLabels(const Mat4& viewProj)
         const TextAtlas::Entry& e = g_app.textAtlas.entries[static_cast<size_t>(labelIndex)];
         const float tw = e.pixelW * scale;
         const float th = e.pixelH * scale;
-        const float left = sx - tw * 0.5f;
-        const float top = sy - th - 4.f;
+        float left = sx - tw * 0.5f;
+        float top = sy - th - 4.f;
+
+        // 简单避让：与已放置的标签重叠时逐级上移，仍冲突则本帧不画，避免多层文字叠成一团
+        bool room = false;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            bool hit = false;
+            for (size_t k = 0; k + 3 < placed.size(); k += 4) {
+                if (left < placed[k] + placed[k + 2] && left + tw > placed[k]
+                    && top < placed[k + 1] + placed[k + 3] && top + th > placed[k + 1]) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) { room = true; break; }
+            top -= th + 5.f;
+        }
+        if (!room) return;
+        placed.push_back(left);
+        placed.push_back(top);
+        placed.push_back(tw);
+        placed.push_back(th);
 
         PushTextQuad(verts, left + 2.f, top + 2.f, tw, th, e.u0, e.v0, e.u1, e.v1, W, H,
                      Vec3(0.f, 0.f, 0.f), alpha * 0.8f);
@@ -1052,12 +1084,12 @@ void DrawLabels(const Mat4& viewProj)
         const std::vector<SymbolSet>& movs = g_app.symbols.Movements();
         for (size_t i = 0; i < movs.size(); ++i) {
             const SymbolSet& m = movs[i];
-            if (g_app.currentDay < m.startDay || g_app.currentDay > m.endDay + 20) continue;
+            if (g_app.currentDay < m.startDay || g_app.currentDay > m.endDay + 8) continue;
             if (m.lon.size() < 2) continue;
 
             float progress = 1.f;
             if (m.endDay > m.startDay) {
-                progress = static_cast<float>(g_app.currentDay - m.startDay)
+                progress = (g_app.currentDayExact - static_cast<float>(m.startDay))
                            / static_cast<float>(m.endDay - m.startDay);
                 progress = std::max(0.08f, std::min(1.f, progress));
             }
@@ -1087,7 +1119,12 @@ void DrawLabels(const Mat4& viewProj)
 
             Vec3 col(1.f, 0.86f, 0.42f);
             if (m.side == "cn") col = Vec3(0.62f, 0.80f, 1.f);
-            emit(lon, lat, g_app.unitLabelBase + static_cast<int>(i), col, 0.96f, 4.2f);
+            // 行军结束后标签同步淡出，避免长空档期留下过期标注
+            float late = 1.f;
+            if (g_app.currentDayExact > static_cast<float>(m.endDay)) {
+                late = std::max(0.f, 1.f - (g_app.currentDayExact - static_cast<float>(m.endDay)) / 8.f);
+            }
+            emit(lon, lat, g_app.unitLabelBase + static_cast<int>(i), col, 0.96f * late, 4.2f);
         }
     }
 
@@ -1135,6 +1172,7 @@ int main(int argc, char** argv)
     bool shotMode = false;
     bool nearShot = false;
     bool benchMode = false;
+    int dateOverride = 0;
     std::string shotPath = "war3d_shot.bmp";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--shot") == 0 && i + 1 < argc) {
@@ -1144,6 +1182,8 @@ int main(int argc, char** argv)
             nearShot = true;
         } else if (std::strcmp(argv[i], "--bench") == 0) {
             benchMode = true;
+        } else if (std::strcmp(argv[i], "--date") == 0 && i + 1 < argc) {
+            dateOverride = std::atoi(argv[++i]);
         }
     }
 
@@ -1151,6 +1191,7 @@ int main(int argc, char** argv)
     g_app.demoEndDay = DateToDays(kDemoEnd);
     g_app.currentDay = DateToDays(kBattleStart);
     if (shotMode) g_app.currentDay = DateToDays(19390926);
+    if (dateOverride != 0) g_app.currentDay = DateToDays(dateOverride);
     g_app.currentDayExact = static_cast<float>(g_app.currentDay);
 
     glfwSetErrorCallback([](int code, const char* desc) {
@@ -1200,20 +1241,17 @@ int main(int argc, char** argv)
     }
     g_app.events.Load(dataDir + "/events_changsha1939.csv");
 
-    // 先加载河道与湖区，河面入湖段要抬到湖面高度才能连成一片
+    // 水系轮廓来自 World_Topo_Map 掩码，Prepare 要把 DEM 压到水位以下，必须早于地形构建
     g_app.routes.Load(dataDir + "/routes.csv");
     g_app.water.LoadBodies(dataDir + "/water_bodies.csv");
-    g_app.riverWater.Prepare(g_app.routes.All(), g_app.heights, g_app.bounds,
-                             g_app.heightExaggeration, g_app.water.Bodies(),
-                             g_app.waterLevelMeters);
+    g_app.water.LoadMask(dataDir + "/water_mask_u8.raw", 2048);
+    g_app.water.LoadDepth(dataDir + "/water_depth_u8.raw", 2048);
+    g_app.water.Prepare(g_app.heights, g_app.bounds);
 
     g_app.terrain.Build(g_app.heights, g_app.bounds, g_app.meshRes, g_app.heightExaggeration);
 
     g_app.routes.Build(g_app.heights, g_app.bounds, g_app.heightExaggeration, g_app.terrain);
-    g_app.riverWater.Build();
-
-    g_app.water.Build(g_app.heights, g_app.bounds, g_app.heightExaggeration, g_app.terrain,
-                      g_app.waterLevelMeters);
+    g_app.water.Build(g_app.heights, g_app.bounds, g_app.heightExaggeration);
 
     g_app.symbols.Load(dataDir);
     g_app.narration.Load(dataDir + "/narration.csv");
@@ -1362,8 +1400,8 @@ int main(int argc, char** argv)
             for (const WaterBody& b : g_app.water.Bodies()) builder.AddText(b.name.c_str());
             for (const NarrationLine& n : g_app.narration.All()) builder.AddText(n.text.c_str());
             for (int i = 0; i < kPlaceCount; ++i) builder.AddText(kPlaces[i].name);
-            builder.AddText("播放暂停回到开战速度全景湘北长沙本日战况全部事件来源置信度水位环境"
-                            "第一次长沙会战年月日湘鄂赣日军中国无记录");
+            builder.AddText("播放暂停回到开战速度全景湘北长沙本日战况全部事件来源置信度水系"
+                            "第一次长沙会战年月日湘鄂赣日军中国无记录轮廓取自制图底图");
             for (int d = g_app.demoStartDay; d <= g_app.demoEndDay; ++d) {
                 builder.AddText(DaysToDateString(d).c_str());
             }
@@ -1411,12 +1449,6 @@ int main(int argc, char** argv)
         ImGui::NewFrame();
         DrawUI();
 
-        // 水位滑杆改动后重建水面
-        if (g_app.waterDirty) {
-            g_app.waterDirty = false;
-            g_app.water.Build(g_app.heights, g_app.bounds, g_app.heightExaggeration,
-                              g_app.terrain, g_app.waterLevelMeters);
-        }
 
         // ---- 输入 ----
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) glfwSetWindowShouldClose(window, 1);
@@ -1529,9 +1561,23 @@ int main(int argc, char** argv)
         glUniform3f(glGetUniformLocation(g_app.progWater, "uEye"), eye.x, eye.y, eye.z);
         glUniform3f(glGetUniformLocation(g_app.progWater, "uSunDir"), -0.58f, 0.55f, 0.60f);
         glUniform1f(glGetUniformLocation(g_app.progWater, "uTime"), static_cast<float>(now));
+        {
+            const float midLat = 0.5f * (g_app.bounds.latMin + g_app.bounds.latMax);
+            const float kmPerLon = 111.32f * std::cos(midLat * 3.14159265358979f / 180.f);
+            const float worldW = g_app.bounds.LonSpan() * kmPerLon;
+            const float worldD = g_app.bounds.LatSpan() * 110.9f;
+            glUniform2f(glGetUniformLocation(g_app.progWater, "uWorldSize"), worldW, worldD);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, g_app.water.MaskTexture());
+            glUniform1i(glGetUniformLocation(g_app.progWater, "uWaterMask"), 0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, g_app.albedoTex);
+            glUniform1i(glGetUniformLocation(g_app.progWater, "uAlbedo"), 1);
+            glUniform1f(glGetUniformLocation(g_app.progWater, "uHasAlbedo"),
+                        g_app.albedoTex != 0 ? 1.f : 0.f);
+            glActiveTexture(GL_TEXTURE0);
+        }
         glDepthMask(GL_FALSE);
-        // 河与湖共用一套材质，交界处用顶点里的 riverMix 平滑过渡
-        g_app.riverWater.Draw();
         g_app.water.Draw();
         glDepthMask(GL_TRUE);
 
@@ -1558,7 +1604,7 @@ int main(int argc, char** argv)
 
         // 战史图符号：进攻箭头 / 占领区 / 防御阵地
         g_app.symbols.Draw(g_app.progSymbol, viewProj, g_app.currentDayExact, g_app.heights,
-                           g_app.bounds, g_app.heightExaggeration, g_app.terrain);
+                           g_app.bounds, g_app.heightExaggeration, g_app.terrain, g_app.events);
 
         // 炮火：当前正在进行的战斗事件
         {
@@ -1633,7 +1679,6 @@ int main(int argc, char** argv)
     g_app.terrain.Destroy();
     g_app.routes.Destroy();
     g_app.water.Destroy();
-    g_app.riverWater.Destroy();
     g_app.symbols.Destroy();
     if (g_app.vboFire) glDeleteBuffers(1, &g_app.vboFire);
     if (g_app.vaoFire) glDeleteVertexArrays(1, &g_app.vaoFire);

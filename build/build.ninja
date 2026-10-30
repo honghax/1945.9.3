@@ -109,16 +109,6 @@ build CMakeFiles\war3d.dir\src\water.cpp.obj: CXX_COMPILER__war3d_unscanned_Rele
   TARGET_PDB = war3d.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\war3d.dir
 
-build CMakeFiles\war3d.dir\src\river_water.cpp.obj: CXX_COMPILER__war3d_unscanned_Release E$:\project\1945\war3d\src\river_water.cpp || cmake_object_order_depends_target_war3d
-  CONFIG = Release
-  FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /utf-8
-  INCLUDES = -IE:\project\1945\war3d\src -IE:\project\1945\war3d\third_party\include -IE:\project\1945\war3d\third_party\glfw-3.4.bin.WIN64\include -IE:\project\1945\war3d\third_party\imgui -IE:\project\1945\war3d\third_party\imgui\backends
-  OBJECT_DIR = CMakeFiles\war3d.dir
-  OBJECT_FILE_DIR = CMakeFiles\war3d.dir\src
-  TARGET_COMPILE_PDB = CMakeFiles\war3d.dir\
-  TARGET_PDB = war3d.pdb
-  TARGET_SUPPORT_DIR = CMakeFiles\war3d.dir
-
 build CMakeFiles\war3d.dir\src\map_symbols.cpp.obj: CXX_COMPILER__war3d_unscanned_Release E$:\project\1945\war3d\src\map_symbols.cpp || cmake_object_order_depends_target_war3d
   CONFIG = Release
   FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /utf-8
@@ -217,7 +207,7 @@ build CMakeFiles\war3d.dir\third_party\glad.c.obj: C_COMPILER__war3d_unscanned_R
 #############################################
 # Link the executable war3d.exe
 
-build war3d.exe: CXX_EXECUTABLE_LINKER__war3d_Release CMakeFiles\war3d.dir\src\main.cpp.obj CMakeFiles\war3d.dir\src\terrain.cpp.obj CMakeFiles\war3d.dir\src\events.cpp.obj CMakeFiles\war3d.dir\src\text_atlas.cpp.obj CMakeFiles\war3d.dir\src\routes.cpp.obj CMakeFiles\war3d.dir\src\water.cpp.obj CMakeFiles\war3d.dir\src\river_water.cpp.obj CMakeFiles\war3d.dir\src\map_symbols.cpp.obj CMakeFiles\war3d.dir\src\narration.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui_draw.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui_tables.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui_widgets.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\backends\imgui_impl_glfw.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\backends\imgui_impl_opengl3.cpp.obj CMakeFiles\war3d.dir\third_party\glad.c.obj | E$:\project\1945\war3d\third_party\glfw-3.4.bin.WIN64\lib-vc2022\glfw3.lib
+build war3d.exe: CXX_EXECUTABLE_LINKER__war3d_Release CMakeFiles\war3d.dir\src\main.cpp.obj CMakeFiles\war3d.dir\src\terrain.cpp.obj CMakeFiles\war3d.dir\src\events.cpp.obj CMakeFiles\war3d.dir\src\text_atlas.cpp.obj CMakeFiles\war3d.dir\src\routes.cpp.obj CMakeFiles\war3d.dir\src\water.cpp.obj CMakeFiles\war3d.dir\src\map_symbols.cpp.obj CMakeFiles\war3d.dir\src\narration.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui_draw.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui_tables.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\imgui_widgets.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\backends\imgui_impl_glfw.cpp.obj CMakeFiles\war3d.dir\third_party\imgui\backends\imgui_impl_opengl3.cpp.obj CMakeFiles\war3d.dir\third_party\glad.c.obj | E$:\project\1945\war3d\third_party\glfw-3.4.bin.WIN64\lib-vc2022\glfw3.lib
   CONFIG = Release
   FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -MD
   LINK_FLAGS = /machine:x64 /INCREMENTAL:NO /subsystem:console /LIBPATH:F:/vs/VC/Tools/MSVC/14.51.36231/lib/x64 "/LIBPATH:C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64" "/LIBPATH:C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/ucrt/x64"

@@ -10,6 +10,8 @@
 #include "math3d.h"
 #include "terrain.h"
 
+class EventTable;
+
 struct SymbolSet {
     std::string name;
     std::string side;    // jp / cn
@@ -27,7 +29,8 @@ public:
 
     bool Load(const std::string& dataDir);
     void Draw(GLuint program, const Mat4& viewProj, float currentDayExact, const HeightField& hf,
-              const GeoBounds& bounds, float heightExaggeration, const TerrainMesh& terrain);
+              const GeoBounds& bounds, float heightExaggeration, const TerrainMesh& terrain,
+              const EventTable& events);
     void Destroy();
 
     size_t MovementCount() const { return movements_.size(); }
